@@ -1,0 +1,15 @@
+models/
+python/
+__pycache__/
+*.py[cod]
+*.log
+*.tmp
+*.temp
+test-face.jpg
+.pytest_cache/
+.venv/
+venv/
+env/
+.env
+Thumbs.db
+desktop.ini

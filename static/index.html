@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Face Estimate Lab</title><link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <main class="shell">
+    <section class="hero"><div class="eyebrow">LOCAL COMPUTER VISION</div><h1>Face Estimate <span>Lab</span></h1><p>사진 속 얼굴을 CPU에서 분석하는 로컬 데모입니다.</p></section>
+    <section class="card">
+      <div class="drop" id="drop"><input id="file" type="file" accept="image/*" hidden /><div class="icon">◎</div><h2>이미지를 올려보세요</h2><p>클릭하거나 이미지를 여기로 끌어오세요 · 최대 10MB</p><button id="choose">파일 선택</button></div>
+      <div class="preview-wrap hidden" id="previewWrap"><div class="preview-head"><span id="filename"></span><button class="ghost" id="reset">다른 이미지</button></div><div class="preview"><img id="preview" alt="업로드 미리보기" /></div><button class="analyze" id="analyze">분석 시작</button></div>
+      <div class="status" id="status"></div><div id="results"></div>
+    </section>
+    <p class="disclaimer">⚠ 결과는 참고용 추정치입니다. 얼굴의 실제 나이·성별을 확정하거나 개인을 식별하지 않습니다. 업로드 이미지는 이 로컬 앱 밖으로 전송되지 않습니다.</p>
+  </main><script src="/static/app.js"></script>
+</body></html>
