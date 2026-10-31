@@ -1,0 +1,85 @@
+name: Deploy latest Docker image to Windows runner
+
+on:
+  workflow_run:
+    workflows: ["Build and push Docker image"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: [self-hosted, Windows, X64]
+    steps:
+      - name: Verify Docker is installed and the engine is running
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $docker = Get-Command docker -ErrorAction Stop
+          & $docker.Source version
+          if ($LASTEXITCODE -ne 0) { throw 'Docker CLI could not connect to the Docker engine.' }
+          & $docker.Source info
+          if ($LASTEXITCODE -ne 0) { throw 'Docker engine is not running or is inaccessible to this runner.' }
+
+      - name: Sign in to Docker Hub
+        shell: powershell
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace($env:DOCKERHUB_USERNAME)) { throw 'Missing DOCKERHUB_USERNAME secret.' }
+          if ([string]::IsNullOrWhiteSpace($env:DOCKERHUB_TOKEN)) { throw 'Missing DOCKERHUB_TOKEN secret.' }
+          $env:DOCKERHUB_TOKEN | & docker login --username $env:DOCKERHUB_USERNAME --password-stdin
+          if ($LASTEXITCODE -ne 0) { throw 'Docker Hub login failed.' }
+
+      - name: Pull latest image
+        shell: powershell
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $image = "$($env:DOCKERHUB_USERNAME)/face-estimator:latest"
+          & docker pull $image
+          if ($LASTEXITCODE -ne 0) { throw "Could not pull $image." }
+
+      - name: Replace running app container
+        shell: powershell
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $image = "$($env:DOCKERHUB_USERNAME)/face-estimator:latest"
+          $container = 'face-estimator'
+
+          # The new image is already pulled before stopping the current service.
+          $existing = & docker container inspect $container 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            & docker stop $container
+            if ($LASTEXITCODE -ne 0) { throw 'Could not stop the existing face-estimator container.' }
+            & docker rm $container
+            if ($LASTEXITCODE -ne 0) { throw 'Could not remove the existing face-estimator container.' }
+          }
+
+          & docker run --detach --name $container --restart unless-stopped --publish 8000:8000 $image
+          if ($LASTEXITCODE -ne 0) { throw 'Could not start the new face-estimator container.' }
+
+          $ready = $false
+          for ($attempt = 1; $attempt -le 30; $attempt++) {
+            try {
+              $health = Invoke-RestMethod -Uri 'http://localhost:8000/api/health' -TimeoutSec 3
+              if ($health.status -eq 'ok' -and $health.models_ready -eq $true) {
+                $ready = $true
+                break
+              }
+            } catch { }
+            Start-Sleep -Seconds 2
+          }
+          if (-not $ready) {
+            & docker logs $container
+            throw 'Container started but the app/model health check did not pass.'
+          }
+          Write-Host 'Deployment succeeded; app and models are ready at http://localhost:8000.'
