@@ -1,0 +1,10 @@
+.git
+.github
+__pycache__/
+*.py[cod]
+*.log
+test-face.jpg
+python/
+upload/
+.venv/
+venv/
