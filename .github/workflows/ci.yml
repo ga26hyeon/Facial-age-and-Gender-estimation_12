@@ -31,7 +31,7 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build and push image
+      - name: Build image for verification
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -50,11 +50,16 @@ jobs:
           done
           python -c "import json; health=json.load(open('health.json')); assert health.get('status') == 'ok' and health.get('models_ready') is True, health; print(health)"
 
-      - name: Build and push image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/face-estimator:latest
-            ${{ secrets.DOCKERHUB_USERNAME }}/face-estimator:${{ github.sha }}
+      - name: Tag verified image
+        run: |
+          docker tag face-estimator:ci "${DOCKERHUB_USERNAME}/face-estimator:latest"
+          docker tag face-estimator:ci "${DOCKERHUB_USERNAME}/face-estimator:${GITHUB_SHA}"
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+
+      - name: Push verified images to Docker Hub
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+        run: |
+          docker push "${DOCKERHUB_USERNAME}/face-estimator:latest"
+          docker push "${DOCKERHUB_USERNAME}/face-estimator:${GITHUB_SHA}"

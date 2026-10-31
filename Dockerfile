@@ -33,8 +33,8 @@ RUN mkdir -p /app/models \
 COPY app.py .
 COPY static/ ./static/
 
-# Fail the image build if the downloaded model files cannot be loaded.
-RUN python -c "import cv2, numpy as np; p='/app/models/'; cv2.dnn.readNetFromTensorflow(np.fromfile(p+'face.pb',dtype=np.uint8),np.fromfile(p+'face.prototxt',dtype=np.uint8)); cv2.dnn.readNetFromCaffe(p+'age.prototxt',p+'age.caffemodel'); cv2.dnn.readNetFromCaffe(p+'gender.prototxt',p+'gender.caffemodel'); print('All face, age, and gender models loaded successfully')"
+# Exercise the same loader the app uses; fail the build if any model cannot load.
+RUN python -c "import app; app.load_models(); assert app.face_net is not None and app.age_net is not None and app.gender_net is not None; print('All face, age, and gender models loaded successfully')"
 
 EXPOSE 8000
 
