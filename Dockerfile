@@ -6,9 +6,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Runtime libraries required by the headless OpenCV wheel.
+# curl and CA certificates are needed to fetch model files over HTTPS during
+# the image build. The OpenCV runtime libraries are also installed here.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libglib2.0-0 libgl1 \
+    && apt-get install -y --no-install-recommends ca-certificates curl libglib2.0-0 libgl1 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
@@ -21,10 +22,19 @@ RUN mkdir -p /app/models \
     && curl -fL "https://raw.githubusercontent.com/spmallick/learnopencv/master/AgeGender/age_deploy.prototxt" -o /app/models/age.prototxt \
     && curl -fL "https://github.com/GilLevi/AgeGenderDeepLearning/raw/master/models/age_net.caffemodel" -o /app/models/age.caffemodel \
     && curl -fL "https://raw.githubusercontent.com/spmallick/learnopencv/master/AgeGender/gender_deploy.prototxt" -o /app/models/gender.prototxt \
-    && curl -fL "https://github.com/GilLevi/AgeGenderDeepLearning/raw/master/models/gender_net.caffemodel" -o /app/models/gender.caffemodel
+    && curl -fL "https://github.com/GilLevi/AgeGenderDeepLearning/raw/master/models/gender_net.caffemodel" -o /app/models/gender.caffemodel \
+    && test -s /app/models/face.prototxt \
+    && test -s /app/models/face.pb \
+    && test -s /app/models/age.prototxt \
+    && test -s /app/models/age.caffemodel \
+    && test -s /app/models/gender.prototxt \
+    && test -s /app/models/gender.caffemodel
 
 COPY app.py .
 COPY static/ ./static/
+
+# Fail the image build if the downloaded model files cannot be loaded.
+RUN python -c "import cv2, numpy as np; p='/app/models/'; cv2.dnn.readNetFromTensorflow(np.fromfile(p+'face.pb',dtype=np.uint8),np.fromfile(p+'face.prototxt',dtype=np.uint8)); cv2.dnn.readNetFromCaffe(p+'age.prototxt',p+'age.caffemodel'); cv2.dnn.readNetFromCaffe(p+'gender.prototxt',p+'gender.caffemodel'); print('All face, age, and gender models loaded successfully')"
 
 EXPOSE 8000
 
