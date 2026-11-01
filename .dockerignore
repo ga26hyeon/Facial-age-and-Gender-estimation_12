@@ -4,6 +4,9 @@ __pycache__/
 *.py[cod]
 *.log
 test-face.jpg
+evaluation/
+models/
+actions-runner/
 python/
 upload/
 .venv/

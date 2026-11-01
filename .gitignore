@@ -14,5 +14,13 @@ env/
 Thumbs.db
 desktop.ini
 
+# Evaluation image payloads and caches are local-only; keep reports and manifest tracked
+evaluation/data/
+evaluation/cache/
+evaluation/**/*.jpg
+evaluation/**/*.jpeg
+evaluation/**/*.png
+evaluation/**/*.webp
+
 # GitHub Actions self-hosted runner installation and runtime workspace
 actions-runner/

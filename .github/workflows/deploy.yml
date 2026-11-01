@@ -79,7 +79,7 @@ jobs:
           for ($attempt = 1; $attempt -le 30; $attempt++) {
             try {
               $health = Invoke-RestMethod -Uri 'http://localhost:8000/api/health' -TimeoutSec 3
-              if ($health.status -eq 'ok' -and $health.models_ready -eq $true) {
+              if ($health.status -eq 'ok' -and $health.models_ready -eq $true -and $health.attribute_model -eq 'snakajima/face-lens' -and $health.attribute_model_revision -eq 'd8e2c4cafb5e14a258202d8f5176973d25a244df') {
                 $ready = $true
                 break
               }

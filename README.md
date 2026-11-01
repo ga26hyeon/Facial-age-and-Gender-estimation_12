@@ -1,49 +1,33 @@
 # Face Estimate Lab
 
-로컬 Windows 컴퓨터에서 이미지 속 얼굴을 검출하고 나이대·성별을 추정하는 FastAPI 웹앱입니다. 일반 노트북 CPU에서 실행하도록 OpenCV DNN과 공개 사전학습 모델을 사용합니다.
+FastAPI 웹앱이 얼굴을 검출하고 연령대·성별을 추정합니다. 로컬 CPU에서 실행하도록 OpenCV DNN 얼굴 검출기와 ONNX 사전학습 모델을 사용합니다.
 
-> 결과는 참고용 추정치이며 실제 나이·성별을 확정하거나 개인을 식별하지 않습니다. 업로드 이미지는 이 앱 외부로 전송되지 않습니다.
+> 결과는 참고용 추정치이며 실제 나이·성별을 확정하거나 개인을 식별하지 않습니다. 업로드 이미지는 앱 외부로 전송하지 않습니다.
 
-## 요구 사항
+## 실행 환경
 
-- Windows 10/11
-- Python 3.10 이상
-- 인터넷 연결: Python 패키지와 모델을 처음 준비할 때 필요
+- Python 3.11
+- 고정된 패키지 버전: `requirements.txt`
+- 모델 준비 시 인터넷 연결 필요
 
-## 설치
+## 설치 및 모델 준비
 
-PowerShell에서 프로젝트 폴더로 이동한 뒤 실행합니다.
+PowerShell에서 저장소 폴더로 이동한 뒤 실행합니다.
 
 ```powershell
 python -m pip install -r requirements.txt
-```
-
-Python이 PATH에 없다면 설치된 Python 실행 파일의 전체 경로로 위 명령을 실행하세요.
-
-## 모델 준비
-
-프로젝트 루트에 `models` 폴더를 만들고 다음 6개 파일을 저장합니다.
-
-- `face.prototxt`
-- `face.pb`
-- `age.prototxt`
-- `age.caffemodel`
-- `gender.prototxt`
-- `gender.caffemodel`
-
-PowerShell에서 다음 명령으로 공개 저장소에서 준비할 수 있습니다.
-
-```powershell
 New-Item -ItemType Directory -Force models
-curl.exe -L https://raw.githubusercontent.com/spmallick/learnopencv/master/AgeGender/opencv_face_detector.pbtxt -o models\face.prototxt
-curl.exe -L https://raw.githubusercontent.com/spmallick/learnopencv/master/AgeGender/opencv_face_detector_uint8.pb -o models\face.pb
-curl.exe -L https://raw.githubusercontent.com/spmallick/learnopencv/master/AgeGender/age_deploy.prototxt -o models\age.prototxt
-curl.exe -L https://github.com/GilLevi/AgeGenderDeepLearning/raw/master/models/age_net.caffemodel -o models\age.caffemodel
-curl.exe -L https://raw.githubusercontent.com/spmallick/learnopencv/master/AgeGender/gender_deploy.prototxt -o models\gender.prototxt
-curl.exe -L https://github.com/GilLevi/AgeGenderDeepLearning/raw/master/models/gender_net.caffemodel -o models\gender.caffemodel
+$revision = 'd8e2c4cafb5e14a258202d8f5176973d25a244df'
+curl.exe -fL https://raw.githubusercontent.com/spmallick/learnopencv/master/AgeGender/opencv_face_detector.pbtxt -o models\face.prototxt
+curl.exe -fL https://raw.githubusercontent.com/spmallick/learnopencv/master/AgeGender/opencv_face_detector_uint8.pb -o models\face.pb
+curl.exe -fL "https://huggingface.co/snakajima/face-lens/resolve/$revision/student.onnx?download=true" -o models\student.onnx
+curl.exe -fL "https://huggingface.co/snakajima/face-lens/resolve/$revision/student.json?download=true" -o models\student.json
+curl.exe -fL "https://huggingface.co/snakajima/face-lens/resolve/$revision/ATTRIBUTION.csv?download=true" -o models\ATTRIBUTION.csv
 ```
 
-모델 가중치는 크기가 크므로 GitHub 저장소에 커밋하지 않는 것을 권장합니다.
+`models/` is excluded from Git. Docker builds download these assets and verify the ONNX, metadata, and attribution file SHA-256 hashes. `ATTRIBUTION.csv` is included in the image as required by the model publisher's attribution guidance.
+
+The age/gender model is [`snakajima/face-lens`](https://huggingface.co/snakajima/face-lens), revision `d8e2c4cafb5e14a258202d8f5176973d25a244df`, licensed CC BY 4.0. Its age and gender heads were trained from FairFace human labels. The implementation keeps the existing OpenCV detector and uses its face box to create the model's expanded, vertically shifted crop, followed by the model metadata's RGB mean/std normalization.
 
 ## 실행
 
@@ -51,7 +35,7 @@ curl.exe -L https://github.com/GilLevi/AgeGenderDeepLearning/raw/master/models/g
 python -m uvicorn app:app --host 127.0.0.1 --port 8000
 ```
 
-브라우저에서 `http://127.0.0.1:8000/`을 엽니다. 이미지를 선택하거나 드래그한 뒤 `분석 시작`을 누르면 됩니다.
+Open `http://127.0.0.1:8000/`. Upload a photo or drag it onto the page, then choose **분석 시작**.
 
 ## API 확인
 
@@ -59,4 +43,12 @@ python -m uvicorn app:app --host 127.0.0.1 --port 8000
 Invoke-RestMethod http://127.0.0.1:8000/api/health
 ```
 
-`models_ready`가 `True`인지 확인하세요.
+`status` should be `ok` and `models_ready` should be `True`. The upload endpoint remains `POST /api/analyze` and returns face boxes, gender/age labels, and confidence values.
+
+## 모델 평가
+
+`evaluation/` contains the 100 FairFace validation images, a fixed split manifest, and before/after results. The 30-row tuning set is separate from the 70-row held-out final set. Details, data source/license, and limitations are in [evaluation/RESULTS.md](evaluation/RESULTS.md).
+
+## CI/CD
+
+Pushes build and check the Docker image, including model download, SHA verification, model loading, and the HTTP health endpoint. The `main` CI workflow uploads the verified image to Docker Hub; the existing Windows self-hosted deployment workflow then pulls that image and replaces the local container. GitHub Actions needs `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` repository secrets, and the Windows runner needs an available Docker engine.

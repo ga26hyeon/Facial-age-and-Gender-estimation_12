@@ -1,0 +1,73 @@
+{
+  "dataset": {
+    "name": "HuggingFaceM4/FairFace",
+    "config": "0.25",
+    "split": "validation",
+    "viewer_revision": "54d573cdb8b5af490ba8da9da2799628f6e5c496",
+    "sample_count": 100,
+    "full_validation_parquet_used_for_this_protocol": false,
+    "older_temporary_parquet_deleted_before_this_protocol": true,
+    "row_metadata_scanned_for_unseen_final_sample": 2500,
+    "tuning_count": 30,
+    "final_count": 70,
+    "final_sample_disjoint_from_prior_exploratory_inference": true,
+    "final_gender_counts": {
+      "Male": 35,
+      "Female": 35
+    }
+  },
+  "metrics": {
+    "definitions": {
+      "gender_accuracy": "correct binary gender label / detected faces",
+      "age_accuracy": "correct seven-group age bin / detected faces",
+      "age_ordinal_mae": "mean absolute difference between predicted and labeled seven-group age-bin indices"
+    },
+    "tuning_30": {
+      "detected": 30,
+      "baseline": {
+        "gender_accuracy": 0.4,
+        "age_accuracy": 0.2666667,
+        "age_ordinal_mae": 1.9
+      },
+      "attempt_a_direct_detector_crop": {
+        "gender_accuracy": 0.6,
+        "age_accuracy": 0.2666667,
+        "age_ordinal_mae": 1.7
+      },
+      "attempt_b_metadata_expanded_crop": {
+        "gender_accuracy": 0.9333333,
+        "age_accuracy": 0.5333333,
+        "age_ordinal_mae": 0.8
+      }
+    },
+    "held_out_final_70": {
+      "detected": 70,
+      "baseline": {
+        "gender_accuracy": 0.4571429,
+        "age_accuracy": 0.2428571,
+        "age_ordinal_mae": 1.9285714
+      },
+      "candidate_b": {
+        "gender_accuracy": 0.8142857,
+        "age_accuracy": 0.5857143,
+        "age_ordinal_mae": 0.5571429
+      },
+      "candidate_age_accuracy_by_group": {
+        "0-9": {"n": 16, "accuracy": 0.75},
+        "10-19": {"n": 8, "accuracy": 0.5},
+        "20-29": {"n": 8, "accuracy": 0.5},
+        "30-39": {"n": 8, "accuracy": 0.375},
+        "40-49": {"n": 6, "accuracy": 0.3333333},
+        "50-59": {"n": 8, "accuracy": 0.25},
+        "60+": {"n": 16, "accuracy": 0.875}
+      }
+    }
+  },
+  "candidate_model": {
+    "repo": "snakajima/face-lens",
+    "revision": "d8e2c4cafb5e14a258202d8f5176973d25a244df",
+    "license": "CC BY 4.0",
+    "student_onnx_sha256": "2c7405e280a9281c1bd0721f929a14b6da47d24b6cb1193aaf2bd4799d2640da",
+    "student_json_sha256": "fdf1ae3136aec4e4026d8bb04cad9d971263b6ae3653d2b376df8ee8e05a5bd5"
+  }
+}
