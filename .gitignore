@@ -13,3 +13,6 @@ env/
 .env
 Thumbs.db
 desktop.ini
+
+# GitHub Actions self-hosted runner installation and runtime workspace
+actions-runner/
