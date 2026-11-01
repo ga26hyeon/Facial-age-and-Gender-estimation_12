@@ -63,8 +63,9 @@ jobs:
           $container = 'face-estimator'
 
           # The new image is already pulled before stopping the current service.
-          $existing = & docker container inspect $container 2>$null
-          if ($LASTEXITCODE -eq 0) {
+          $existing = & docker ps --all --filter "name=^/$container`$" --format '{{.Names}}'
+          if ($LASTEXITCODE -ne 0) { throw 'Could not check for an existing face-estimator container.' }
+          if ($existing -contains $container) {
             & docker stop $container
             if ($LASTEXITCODE -ne 0) { throw 'Could not stop the existing face-estimator container.' }
             & docker rm $container
