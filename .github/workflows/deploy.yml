@@ -20,7 +20,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Verify Docker Engine without changing the running host service
-        shell: powershell
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
         run: |
           $ErrorActionPreference = 'Stop'
           $dockerDir = Join-Path $env:LOCALAPPDATA 'Programs\DockerDesktop\resources\bin'
@@ -63,7 +63,7 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Pull the CI-verified app and pinned proxy images
-        shell: powershell
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
         env:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
           DEPLOY_SHA: ${{ github.event.workflow_run.head_sha }}
@@ -76,7 +76,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Failed to pull pinned Caddy proxy image.' }
 
       - name: Verify candidate, switch the stable endpoint, and drain old requests
-        shell: powershell
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
         env:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
           DEPLOY_SHA: ${{ github.event.workflow_run.head_sha }}
