@@ -211,5 +211,6 @@ async def api_analyze(file: UploadFile = File(...)):
     return {
         "filename": file.filename,
         "faces": faces,
+        "app_revision": os.getenv("APP_REVISION", "local"),
         "notice": "결과는 사전학습 모델의 추정치이며 실제 나이·성별을 확정하지 않습니다.",
     }
