@@ -27,19 +27,28 @@ jobs:
           $dockerExe = Join-Path $dockerDir 'docker.exe'
           if (-not (Test-Path -LiteralPath $dockerExe)) { throw "Docker CLI not found for runner account: $dockerExe" }
           Add-Content -LiteralPath $env:GITHUB_PATH -Value $dockerDir
+          Write-Host "Runner Docker context: $(& $dockerExe context show)"
           $ready = $false
-          for ($attempt = 1; $attempt -le 12; $attempt++) {
+          $lastOutput = ''
+          $lastError = ''
+          $lastExitCode = $null
+          for ($attempt = 1; $attempt -le 24; $attempt++) {
             $out = Join-Path $env:RUNNER_TEMP 'docker-version.out'
             $err = Join-Path $env:RUNNER_TEMP 'docker-version.err'
             Remove-Item $out, $err -Force -ErrorAction SilentlyContinue
             $probe = Start-Process $dockerExe -ArgumentList 'version' -PassThru -NoNewWindow -RedirectStandardOutput $out -RedirectStandardError $err
             if ($probe.WaitForExit(5000)) {
-              $output = Get-Content $out -Raw -ErrorAction SilentlyContinue
-              if ($probe.ExitCode -eq 0 -and $output -match 'Server:') { Write-Host $output; $ready = $true; break }
+              $lastOutput = Get-Content $out -Raw -ErrorAction SilentlyContinue
+              $lastError = Get-Content $err -Raw -ErrorAction SilentlyContinue
+              $lastExitCode = $probe.ExitCode
+              if ($probe.ExitCode -eq 0 -and $lastOutput -match 'Server:') { Write-Host $lastOutput; $ready = $true; break }
             } else { Stop-Process -Id $probe.Id -Force -ErrorAction SilentlyContinue }
-            Start-Sleep -Seconds 3
+            Start-Sleep -Seconds 5
           }
           if (-not $ready) {
+            Write-Host "Last docker version exit code: $lastExitCode"
+            Write-Host "Last docker version stdout: $lastOutput"
+            Write-Host "Last docker version stderr: $lastError"
             & $dockerExe desktop status
             & $dockerExe desktop logs --priority 2 --since 20m --no-color
             throw 'Docker Engine is unavailable. Start Docker Desktop manually; this job deliberately did not restart it or change the current service.'
