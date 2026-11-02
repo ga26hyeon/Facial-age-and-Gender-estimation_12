@@ -19,6 +19,11 @@ jobs:
     runs-on: [self-hosted, Windows, X64]
     timeout-minutes: 45
     steps:
+      - name: Check out the CI-verified commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
       - name: Verify Docker Engine without changing the running host service
         shell: powershell -NoProfile -ExecutionPolicy Bypass -Command "& '{0}'"
         run: |
@@ -50,6 +55,76 @@ jobs:
             throw 'Port 8081 is already owned by a non-deployment process. Existing services were left untouched.'
           }
 
+      - name: Start independent analysis API monitor before deployment
+        id: monitor_start
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -Command "& '{0}'"
+        env:
+          MONITOR_SESSION: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Add-Type -AssemblyName System.Drawing
+          $runDir = Join-Path $env:RUNNER_TEMP "face-estimator-redeploy-$env:GITHUB_RUN_ID"
+          New-Item -ItemType Directory -Path $runDir -Force | Out-Null
+          $log = Join-Path $runDir 'redeployment-check.log'
+          $phase = Join-Path $runDir 'phase.txt'
+          $stop = Join-Path $runDir 'stop.txt'
+          $pidPath = Join-Path $runDir 'monitor.pid'
+          $image = Join-Path $runDir 'fixed-analysis-probe.jpg'
+          Remove-Item $log, $phase, $stop, $pidPath, $image -Force -ErrorAction SilentlyContinue
+          [IO.File]::WriteAllText($log, (([ordered]@{type='monitor_setup';utc=[DateTime]::UtcNow.ToString('o');session=$env:MONITOR_SESSION;endpoint='http://127.0.0.1:8081/api/analyze'} | ConvertTo-Json -Compress) + [Environment]::NewLine), [Text.UTF8Encoding]::new($false))
+          $health = Invoke-RestMethod -Uri 'http://127.0.0.1:8081/api/health' -TimeoutSec 5
+          if ($health.status -ne 'ok' -or $health.models_ready -ne $true) { throw 'Stable endpoint is not healthy; deployment has not started.' }
+          # Reuse a local-only, fixed image already present on this self-hosted runner.
+          # If the fixture is unavailable, generate a deterministic image without committing evaluation data.
+          $desktopName = -join ([char[]]@(0xBC14, 0xD0D5, 0x20, 0xD654, 0xBA74))
+          $fixtureRelative = "OneDrive\$desktopName\face_estimator(22)\upload\evaluation\data\images\001.jpg"
+          $fixture = Join-Path $env:USERPROFILE $fixtureRelative
+          if (Test-Path -LiteralPath $fixture) {
+            Copy-Item -LiteralPath $fixture -Destination $image
+            Write-Host 'Monitor will reuse the runner-local fixed face image; it is not copied into the repository or artifact.'
+          } else {
+            Add-Type -AssemblyName System.Drawing
+            $image = Join-Path $runDir 'fixed-analysis-probe.bmp'
+            $bitmap = [System.Drawing.Bitmap]::new(256, 256)
+            $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+            try {
+              $graphics.Clear([System.Drawing.Color]::FromArgb(244, 244, 244))
+              $random = [System.Random]::new(1208)
+              for ($i = 0; $i -lt 700; $i++) {
+                $x = $random.Next(0, 256); $y = $random.Next(0, 256); $shade = $random.Next(150, 230)
+                $bitmap.SetPixel($x, $y, [System.Drawing.Color]::FromArgb($shade, $shade, $shade))
+              }
+              $bitmap.Save($image, [System.Drawing.Imaging.ImageFormat]::Bmp)
+            } finally { $graphics.Dispose(); $bitmap.Dispose() }
+          }
+          [IO.File]::WriteAllText($phase, 'pre-deploy', [Text.UTF8Encoding]::new($false))
+          $script = Join-Path $env:GITHUB_WORKSPACE '.github\scripts\monitor-api.ps1'
+          if (-not (Test-Path -LiteralPath $script)) { throw "Monitor script missing: $script" }
+          $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+          $arguments = '-NoLogo -NoProfile -ExecutionPolicy Bypass -File "{0}" -ImagePath "{1}" -LogPath "{2}" -PhasePath "{3}" -StopPath "{4}" -SessionId "{5}"' -f $script, $image, $log, $phase, $stop, $env:MONITOR_SESSION
+          $process = Start-Process -FilePath $powershell -ArgumentList $arguments -WindowStyle Hidden -PassThru
+          Set-Content -LiteralPath $pidPath -Value $process.Id -NoNewline
+          Write-Host "Independent monitor PID=$($process.Id); endpoint=http://127.0.0.1:8081/api/analyze; fixed image=$image"
+          $deadline = [DateTime]::UtcNow.AddSeconds(60)
+          $verified = $false
+          while ([DateTime]::UtcNow -lt $deadline) {
+            if (Test-Path -LiteralPath $log) {
+              $rows = @(Get-Content -LiteralPath $log -Encoding UTF8 | ForEach-Object { try { $_ | ConvertFrom-Json } catch { $null } })
+              $first = @($rows | Where-Object { $_.type -eq 'request' } | Select-Object -First 1)
+              if ($first.Count -and $first[0].http_status -eq 200 -and $first[0].analysis_ok -eq $true -and $first[0].revision_in_response -eq $true) { $verified = $true; break }
+            }
+            if (-not (Get-Process -Id $process.Id -ErrorAction SilentlyContinue)) { throw 'Independent monitor exited before writing a successful API record.' }
+            Start-Sleep -Milliseconds 250
+          }
+          if (-not $verified) { throw 'No successful versioned analysis response was recorded before deployment; service was not changed.' }
+          Write-Host "Pre-deployment independent monitor check: $($first[0] | ConvertTo-Json -Compress -Depth 8)"
+
+      - name: Mark image pull and deployment observation phase
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -Command "& '{0}'"
+        run: |
+          $phase = Join-Path $env:RUNNER_TEMP "face-estimator-redeploy-$env:GITHUB_RUN_ID\phase.txt"
+          [IO.File]::WriteAllText($phase, 'during-deploy', [Text.UTF8Encoding]::new($false))
+
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
@@ -70,6 +145,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Failed to pull pinned Caddy proxy image.' }
 
       - name: Verify candidate, switch the stable endpoint, and drain old requests
+        id: deploy
         shell: powershell -NoProfile -ExecutionPolicy Bypass -Command "& '{0}'"
         env:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -284,3 +360,62 @@ jobs:
             Remove-Item $config -Force -ErrorAction SilentlyContinue
             Remove-Item $stopFile -Force -ErrorAction SilentlyContinue
           }
+
+      - name: Keep independent monitor running for 30 seconds after deployment result
+        if: ${{ always() && steps.monitor_start.outcome == 'success' }}
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -Command "& '{0}'"
+        env:
+          DEPLOY_OUTCOME: ${{ steps.deploy.outcome }}
+        run: |
+          $runDir = Join-Path $env:RUNNER_TEMP "face-estimator-redeploy-$env:GITHUB_RUN_ID"
+          $phase = Join-Path $runDir 'phase.txt'
+          $log = Join-Path $runDir 'redeployment-check.log'
+          $value = if ($env:DEPLOY_OUTCOME -eq 'success') { 'post-deploy' } else { 'deployment-failed' }
+          [IO.File]::WriteAllText($phase, $value, [Text.UTF8Encoding]::new($false))
+          $result = [ordered]@{ type = 'deployment_result'; utc = [DateTime]::UtcNow.ToString('o'); outcome = $env:DEPLOY_OUTCOME; phase = $value; run_id = $env:GITHUB_RUN_ID } | ConvertTo-Json -Compress
+          [IO.File]::AppendAllText($log, $result + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+          Write-Host "Continuing independent API requests for 30 seconds after deployment outcome: $($env:DEPLOY_OUTCOME)."
+          Start-Sleep -Seconds 30
+
+      - name: Stop independent monitor
+        if: always()
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -Command "& '{0}'"
+        run: |
+          $runDir = Join-Path $env:RUNNER_TEMP "face-estimator-redeploy-$env:GITHUB_RUN_ID"
+          $stop = Join-Path $runDir 'stop.txt'
+          $pidPath = Join-Path $runDir 'monitor.pid'
+          if (Test-Path -LiteralPath $pidPath) {
+            [IO.File]::WriteAllText($stop, 'stop', [Text.UTF8Encoding]::new($false))
+            $monitorPid = [int](Get-Content -LiteralPath $pidPath -Raw)
+            $deadline = [DateTime]::UtcNow.AddSeconds(15)
+            while ([DateTime]::UtcNow -lt $deadline -and (Get-Process -Id $monitorPid -ErrorAction SilentlyContinue)) { Start-Sleep -Milliseconds 250 }
+            if (Get-Process -Id $monitorPid -ErrorAction SilentlyContinue) { Stop-Process -Id $monitorPid -Force; Write-Warning "Stopped monitor PID $monitorPid after its stop marker timed out." }
+          }
+
+      - name: Write request evidence to Actions log and job Summary
+        if: always()
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -Command "& '{0}'"
+        env:
+          CI_RUN_ID: ${{ github.event.workflow_run.id }}
+          DEPLOY_OUTCOME: ${{ steps.deploy.outcome }}
+        run: |
+          $runDir = Join-Path $env:RUNNER_TEMP "face-estimator-redeploy-$env:GITHUB_RUN_ID"
+          $log = Join-Path $runDir 'redeployment-check.log'
+          $script = Join-Path $env:GITHUB_WORKSPACE '.github\scripts\write-deployment-summary.ps1'
+          $outcome = if ([string]::IsNullOrWhiteSpace($env:DEPLOY_OUTCOME)) { 'not-run' } else { $env:DEPLOY_OUTCOME }
+          if (Test-Path -LiteralPath $script) {
+            & $script -LogPath $log -RunId $env:GITHUB_RUN_ID -CiRunId $env:CI_RUN_ID -Repository $env:GITHUB_REPOSITORY -ServerUrl $env:GITHUB_SERVER_URL -DeployOutcome $outcome
+          } else {
+            $message = "# Face Estimator deployment verification`n`nWorkflow checkout did not provide the summary script. Deployment outcome: $outcome.`n"
+            Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value $message
+            Write-Output $message
+          }
+
+      - name: Upload UTF-8 deployment evidence even when deployment fails
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: redeployment-check-${{ github.run_id }}
+          path: ${{ runner.temp }}/face-estimator-redeploy-${{ github.run_id }}/redeployment-check.log
+          if-no-files-found: warn
+          retention-days: 30
