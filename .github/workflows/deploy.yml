@@ -133,17 +133,24 @@ jobs:
 
           try {
             Remove-Item $monitorFile, $stopFile -Force -ErrorAction SilentlyContinue
-            & docker network inspect $network *> $null
-            if ($LASTEXITCODE -ne 0) { & docker network create $network; if ($LASTEXITCODE -ne 0) { throw 'Could not create app network.' } }
+            $networks = @(& docker network ls --format '{{.Name}}')
+            if ($LASTEXITCODE -ne 0) { throw 'Could not list Docker networks.' }
+            if ($networks -notcontains $network) {
+              & docker network create $network
+              if ($LASTEXITCODE -ne 0) { throw 'Could not create app network.' }
+            }
 
-            $null = & docker container inspect $candidate 2>$null
-            if ($LASTEXITCODE -eq 0) { & docker rm --force $candidate; if ($LASTEXITCODE -ne 0) { throw 'Could not remove stale candidate with this run ID.' } }
+            $containers = @(& docker ps --all --format '{{.Names}}')
+            if ($LASTEXITCODE -ne 0) { throw 'Could not list Docker containers.' }
+            if ($containers -contains $candidate) { & docker rm --force $candidate; if ($LASTEXITCODE -ne 0) { throw 'Could not remove stale candidate with this run ID.' } }
             & docker run --detach --name $candidate --restart unless-stopped --network $network --label 'io.face-estimator.role=backend' --label "org.opencontainers.image.revision=$($env:DEPLOY_SHA)" --env "APP_REVISION=$($env:DEPLOY_SHA)" --stop-timeout 125 $image
             if ($LASTEXITCODE -ne 0) { throw "Could not start candidate $candidate." }
             $candidateStarted = $true
 
             # Stage the candidate behind a disposable proxy on another loopback port.
-            & docker rm --force $stageProxy *> $null
+            $containers = @(& docker ps --all --format '{{.Names}}')
+            if ($LASTEXITCODE -ne 0) { throw 'Could not refresh Docker container list before staging.' }
+            if ($containers -contains $stageProxy) { & docker rm --force $stageProxy; if ($LASTEXITCODE -ne 0) { throw 'Could not remove stale staging proxy.' } }
             & docker run --detach --name $stageProxy --network $network --publish "127.0.0.1:${stagePort}:80" $caddyImage
             if ($LASTEXITCODE -ne 0) { throw 'Could not start staging proxy; stable address was not changed.' }
             Set-Route $stageProxy $candidate
@@ -154,8 +161,9 @@ jobs:
             }
             Write-Host "Candidate verified: revision=$($env:DEPLOY_SHA), address=http://127.0.0.1:${stagePort} (staging only)."
 
-            $null = & docker container inspect $proxy 2>$null
-            $proxyExists = ($LASTEXITCODE -eq 0)
+            $containers = @(& docker ps --all --format '{{.Names}}')
+            if ($LASTEXITCODE -ne 0) { throw 'Could not refresh Docker container list before proxy selection.' }
+            $proxyExists = ($containers -contains $proxy)
             if ($proxyExists) {
               $proxyRunning = & docker inspect --format '{{.State.Running}}' $proxy
               if ($proxyRunning -ne 'true') { throw 'Stable proxy exists but is stopped; refusing to disrupt existing services.' }
@@ -240,8 +248,9 @@ jobs:
             Write-Host "Deployment complete: http://127.0.0.1:8081/ -> $candidate (revision $($env:DEPLOY_SHA))."
           } catch {
             Write-Error $_
-            & docker logs $stageProxy 2>$null
-            if ($null -ne $oldConfig) { & docker logs $proxy 2>$null }
+            $containers = @(& docker ps --all --format '{{.Names}}' 2>$null)
+            if ($LASTEXITCODE -eq 0 -and $containers -contains $stageProxy) { & docker logs $stageProxy }
+            if ($LASTEXITCODE -eq 0 -and $null -ne $oldConfig -and $containers -contains $proxy) { & docker logs $proxy }
             if ($switched -and $null -ne $oldConfig) {
               foreach ($oldBackend in $stoppedBackends) {
                 & docker start $oldBackend
@@ -257,11 +266,12 @@ jobs:
               if ($rollbackComplete) { $candidateIsActive = $false; Write-Host 'Rolled back to the previous route; previous container remains available.' }
               else { Write-Error 'Rollback failed; keeping the candidate container running so the active route is not orphaned.' }
             }
-            if ($stableProxyStarted) { & docker rm --force $proxy 2>$null }
+            if ($stableProxyStarted) { & docker rm --force $proxy }
             if ($candidateStarted -and -not $candidateIsActive -and $rollbackComplete) { & docker logs $candidate 2>$null; & docker rm --force $candidate 2>$null }
             throw
           } finally {
-            & docker rm --force $stageProxy 2>$null
+            $containers = @(& docker ps --all --format '{{.Names}}' 2>$null)
+            if ($LASTEXITCODE -eq 0 -and $containers -contains $stageProxy) { & docker rm --force $stageProxy }
             if ($monitor) {
               New-Item -ItemType File -Path $stopFile -Force | Out-Null
               Wait-Job $monitor -Timeout 10 | Out-Null
