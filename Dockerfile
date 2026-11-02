@@ -36,4 +36,4 @@ RUN python -c "import app; app.load_models(); assert app.face_net is not None an
 
 EXPOSE 8000
 
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000", "--timeout-graceful-shutdown", "120"]

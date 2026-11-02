@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 from threading import Lock
 from typing import Any
@@ -181,6 +182,7 @@ def health():
         "models_ready": True,
         "attribute_model": "snakajima/face-lens",
         "attribute_model_revision": FACE_LENS_REVISION,
+        "app_revision": os.getenv("APP_REVISION", "local"),
     }
 
 

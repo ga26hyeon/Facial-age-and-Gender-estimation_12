@@ -40,7 +40,7 @@ jobs:
 
       - name: Verify container starts and models are ready
         run: |
-          docker run --detach --name face-estimator-ci --publish 8000:8000 face-estimator:ci
+          docker run --detach --name face-estimator-ci --env "APP_REVISION=$GITHUB_SHA" --publish 8000:8000 face-estimator:ci
           trap 'docker logs face-estimator-ci || true; docker rm --force face-estimator-ci || true' EXIT
           for attempt in $(seq 1 30); do
             if curl --fail --silent http://localhost:8000/api/health > health.json; then
@@ -48,7 +48,7 @@ jobs:
             fi
             sleep 2
           done
-          python -c "import json; health=json.load(open('health.json')); assert health.get('status') == 'ok' and health.get('models_ready') is True and health.get('attribute_model') == 'snakajima/face-lens' and health.get('attribute_model_revision') == 'd8e2c4cafb5e14a258202d8f5176973d25a244df', health; print(health)"
+          python -c "import json, os; health=json.load(open('health.json')); assert health.get('status') == 'ok' and health.get('models_ready') is True and health.get('attribute_model') == 'snakajima/face-lens' and health.get('attribute_model_revision') == 'd8e2c4cafb5e14a258202d8f5176973d25a244df' and health.get('app_revision') == os.environ['GITHUB_SHA'], health; print(health)"
 
       - name: Tag verified image
         run: |

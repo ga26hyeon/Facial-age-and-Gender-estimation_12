@@ -1,4 +1,4 @@
-name: Deploy latest Docker image to Windows runner
+name: Deploy Docker image to Windows runner
 
 on:
   workflow_run:
@@ -9,33 +9,52 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: face-estimator-deploy
+  cancel-in-progress: false
+
 jobs:
   deploy:
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
     runs-on: [self-hosted, Windows, X64]
+    timeout-minutes: 45
     steps:
-      - name: Add per-user Docker Desktop CLI to PATH
+      - name: Verify Docker Engine without changing the running host service
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
           $dockerDir = Join-Path $env:LOCALAPPDATA 'Programs\DockerDesktop\resources\bin'
           $dockerExe = Join-Path $dockerDir 'docker.exe'
-          if (-not (Test-Path -LiteralPath $dockerExe)) {
-            throw "Docker CLI not found at $dockerExe for the self-hosted runner account."
-          }
+          if (-not (Test-Path -LiteralPath $dockerExe)) { throw "Docker CLI not found for runner account: $dockerExe" }
           Add-Content -LiteralPath $env:GITHUB_PATH -Value $dockerDir
-          & $dockerExe version
-          if ($LASTEXITCODE -ne 0) { throw 'Docker CLI could not connect to the Docker engine.' }
-
-      - name: Verify Docker is installed and the engine is running
-        shell: powershell
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $docker = Get-Command docker -ErrorAction Stop
-          & $docker.Source version
-          if ($LASTEXITCODE -ne 0) { throw 'Docker CLI could not connect to the Docker engine.' }
-          & $docker.Source info
-          if ($LASTEXITCODE -ne 0) { throw 'Docker engine is not running or is inaccessible to this runner.' }
+          $ready = $false
+          for ($attempt = 1; $attempt -le 12; $attempt++) {
+            $out = Join-Path $env:RUNNER_TEMP 'docker-version.out'
+            $err = Join-Path $env:RUNNER_TEMP 'docker-version.err'
+            Remove-Item $out, $err -Force -ErrorAction SilentlyContinue
+            $probe = Start-Process $dockerExe -ArgumentList 'version' -PassThru -NoNewWindow -RedirectStandardOutput $out -RedirectStandardError $err
+            if ($probe.WaitForExit(5000)) {
+              $output = Get-Content $out -Raw -ErrorAction SilentlyContinue
+              if ($probe.ExitCode -eq 0 -and $output -match 'Server:') { Write-Host $output; $ready = $true; break }
+            } else { Stop-Process -Id $probe.Id -Force -ErrorAction SilentlyContinue }
+            Start-Sleep -Seconds 3
+          }
+          if (-not $ready) {
+            & $dockerExe desktop status
+            & $dockerExe desktop logs --priority 2 --since 20m --no-color
+            throw 'Docker Engine is unavailable. Start Docker Desktop manually; this job deliberately did not restart it or change the current service.'
+          }
+          try {
+            $legacy = Invoke-RestMethod -Uri 'http://127.0.0.1:8000/api/health' -TimeoutSec 4
+            Write-Host "Existing endpoint before deployment: http=200, status=$($legacy.status), model_revision=$($legacy.attribute_model_revision)."
+          } catch {
+            Write-Host "Existing endpoint preflight at 127.0.0.1:8000 was unavailable: $($_.Exception.Message). No action will be taken on that port."
+          }
+          # 8081 is reserved for the new local endpoint; never take over another listener.
+          $listeners = Get-NetTCPConnection -State Listen -LocalPort 8081 -ErrorAction SilentlyContinue
+          if ($listeners -and -not (& $dockerExe ps --all --quiet --filter 'name=^/face-estimator-proxy$')) {
+            throw 'Port 8081 is already owned by a non-deployment process. Existing services were left untouched.'
+          }
 
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
@@ -43,51 +62,220 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Pull latest image
+      - name: Pull the CI-verified app and pinned proxy images
         shell: powershell
         env:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DEPLOY_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $image = "$($env:DOCKERHUB_USERNAME)/face-estimator:latest"
+          $image = "$($env:DOCKERHUB_USERNAME)/face-estimator:$($env:DEPLOY_SHA)"
           & docker pull $image
-          if ($LASTEXITCODE -ne 0) { throw "Could not pull $image." }
+          if ($LASTEXITCODE -ne 0) { throw "Failed to pull CI image $image." }
+          & docker pull caddy:2.11.7-alpine
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to pull pinned Caddy proxy image.' }
 
-      - name: Replace running app container
+      - name: Verify candidate, switch the stable endpoint, and drain old requests
         shell: powershell
         env:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DEPLOY_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $image = "$($env:DOCKERHUB_USERNAME)/face-estimator:latest"
-          $container = 'face-estimator'
+          $network = 'face-estimator-net'
+          $proxy = 'face-estimator-proxy'
+          $caddyImage = 'caddy:2.11.7-alpine'
+          $image = "$($env:DOCKERHUB_USERNAME)/face-estimator:$($env:DEPLOY_SHA)"
+          $candidate = "face-estimator-$($env:GITHUB_RUN_ID)"
+          $stageProxy = "face-estimator-proxy-stage-$($env:GITHUB_RUN_ID)"
+          $stagePort = 58100 + ([int]$env:GITHUB_RUN_ID % 4000)
+          $config = Join-Path $env:RUNNER_TEMP 'face-estimator.Caddyfile'
+          $monitorFile = Join-Path $env:RUNNER_TEMP 'face-estimator-deploy-observations.jsonl'
+          $stopFile = Join-Path $env:RUNNER_TEMP 'face-estimator-deploy-monitor.stop'
+          $oldConfig = $null
+          $oldBackends = @()
+          $stoppedBackends = @()
+          $switched = $false
+          $stableProxyStarted = $false
+          $candidateStarted = $false
+          $candidateIsActive = $false
+          $rollbackComplete = $true
+          $monitor = $null
 
-          # The new image is already pulled before stopping the current service.
-          $existing = & docker ps --all --filter "name=^/$container`$" --format '{{.Names}}'
-          if ($LASTEXITCODE -ne 0) { throw 'Could not check for an existing face-estimator container.' }
-          if ($existing -contains $container) {
-            & docker stop $container
-            if ($LASTEXITCODE -ne 0) { throw 'Could not stop the existing face-estimator container.' }
-            & docker rm $container
-            if ($LASTEXITCODE -ne 0) { throw 'Could not remove the existing face-estimator container.' }
-          }
-
-          & docker run --detach --name $container --restart unless-stopped --publish 8000:8000 $image
-          if ($LASTEXITCODE -ne 0) { throw 'Could not start the new face-estimator container.' }
-
-          $ready = $false
-          for ($attempt = 1; $attempt -le 30; $attempt++) {
+          function Write-Observation([string]$phase) {
+            $row = [ordered]@{ time_utc = [DateTime]::UtcNow.ToString('o'); phase = $phase; address = 'http://127.0.0.1:8081/api/health' }
             try {
-              $health = Invoke-RestMethod -Uri 'http://localhost:8000/api/health' -TimeoutSec 3
-              if ($health.status -eq 'ok' -and $health.models_ready -eq $true -and $health.attribute_model -eq 'snakajima/face-lens' -and $health.attribute_model_revision -eq 'd8e2c4cafb5e14a258202d8f5176973d25a244df') {
-                $ready = $true
-                break
+              $health = Invoke-RestMethod -Uri $row.address -TimeoutSec 3
+              $row.status = $health.status
+              $row.models_ready = $health.models_ready
+              $row.app_revision = $health.app_revision
+              $row.model_revision = $health.attribute_model_revision
+              $row.http = 200
+            } catch { $row.http = 'unavailable'; $row.error = $_.Exception.Message }
+            $line = $row | ConvertTo-Json -Compress
+            Write-Host $line
+            Add-Content -LiteralPath $monitorFile -Value $line
+            return $row
+          }
+
+          function Test-Health([string]$uri, [string]$expectedRevision) {
+            for ($i = 1; $i -le 60; $i++) {
+              try {
+                $health = Invoke-RestMethod -Uri $uri -TimeoutSec 3
+                if ($health.status -eq 'ok' -and $health.models_ready -eq $true -and $health.attribute_model -eq 'snakajima/face-lens' -and $health.attribute_model_revision -eq 'd8e2c4cafb5e14a258202d8f5176973d25a244df' -and $health.app_revision -eq $expectedRevision) { return $true }
+              } catch { }
+              Start-Sleep -Seconds 2
+            }
+            return $false
+          }
+
+          function Set-Route([string]$container, [string]$backend) {
+            "{`n    grace_period 3m`n}`n:80 {`n    reverse_proxy ${backend}:8000`n}`n" | Set-Content -LiteralPath $config -Encoding ascii
+            & docker cp $config "${container}:/etc/caddy/Caddyfile"
+            if ($LASTEXITCODE -ne 0) { throw "Failed to write proxy route to $backend." }
+            & docker exec $container caddy reload --config /etc/caddy/Caddyfile
+            if ($LASTEXITCODE -ne 0) { throw "Caddy reload failed while routing to $backend." }
+          }
+
+          try {
+            Remove-Item $monitorFile, $stopFile -Force -ErrorAction SilentlyContinue
+            & docker network inspect $network *> $null
+            if ($LASTEXITCODE -ne 0) { & docker network create $network; if ($LASTEXITCODE -ne 0) { throw 'Could not create app network.' } }
+
+            $null = & docker container inspect $candidate 2>$null
+            if ($LASTEXITCODE -eq 0) { & docker rm --force $candidate; if ($LASTEXITCODE -ne 0) { throw 'Could not remove stale candidate with this run ID.' } }
+            & docker run --detach --name $candidate --restart unless-stopped --network $network --label 'io.face-estimator.role=backend' --label "org.opencontainers.image.revision=$($env:DEPLOY_SHA)" --env "APP_REVISION=$($env:DEPLOY_SHA)" --stop-timeout 125 $image
+            if ($LASTEXITCODE -ne 0) { throw "Could not start candidate $candidate." }
+            $candidateStarted = $true
+
+            # Stage the candidate behind a disposable proxy on another loopback port.
+            & docker rm --force $stageProxy *> $null
+            & docker run --detach --name $stageProxy --network $network --publish "127.0.0.1:${stagePort}:80" $caddyImage
+            if ($LASTEXITCODE -ne 0) { throw 'Could not start staging proxy; stable address was not changed.' }
+            Set-Route $stageProxy $candidate
+            if (-not (Test-Health "http://127.0.0.1:${stagePort}/api/health" $env:DEPLOY_SHA)) {
+              & docker logs $candidate
+              & docker logs $stageProxy
+              throw 'Candidate model/API check failed behind staging proxy; current services remain untouched.'
+            }
+            Write-Host "Candidate verified: revision=$($env:DEPLOY_SHA), address=http://127.0.0.1:${stagePort} (staging only)."
+
+            $null = & docker container inspect $proxy 2>$null
+            $proxyExists = ($LASTEXITCODE -eq 0)
+            if ($proxyExists) {
+              $proxyRunning = & docker inspect --format '{{.State.Running}}' $proxy
+              if ($proxyRunning -ne 'true') { throw 'Stable proxy exists but is stopped; refusing to disrupt existing services.' }
+              $oldConfig = (& docker exec $proxy cat /etc/caddy/Caddyfile) -join "`n"
+              if ($LASTEXITCODE -ne 0) { throw 'Could not read old proxy route; refusing to switch.' }
+              $matches = [regex]::Matches($oldConfig, 'reverse_proxy\s+([A-Za-z0-9._-]+):8000')
+              if ($matches.Count -eq 0) { throw 'Old route is unrecognized; refusing to switch.' }
+              $oldBackends = @($matches | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique)
+
+              # Poll the stable API during the switch and write timestamped evidence to job logs.
+              $monitor = Start-Job -ArgumentList $monitorFile, $stopFile -ScriptBlock {
+                param($outputPath, $haltPath)
+                while (-not (Test-Path -LiteralPath $haltPath)) {
+                  $row = [ordered]@{ time_utc = [DateTime]::UtcNow.ToString('o') }
+                  try {
+                    $h = Invoke-RestMethod -Uri 'http://127.0.0.1:8081/api/health' -TimeoutSec 2
+                    $row.http = 200; $row.status = $h.status; $row.models_ready = $h.models_ready; $row.app_revision = $h.app_revision
+                  } catch { $row.http = 'error'; $row.error = $_.Exception.Message }
+                  Add-Content -LiteralPath $outputPath -Value ($row | ConvertTo-Json -Compress)
+                  Start-Sleep -Milliseconds 500
+                }
               }
-            } catch { }
-            Start-Sleep -Seconds 2
+              Write-Observation 'before-switch'
+              $switched = $true
+              Set-Route $proxy $candidate
+              if (-not (Test-Health 'http://127.0.0.1:8081/api/health' $env:DEPLOY_SHA)) {
+                Set-Content -LiteralPath $config -Value $oldConfig -Encoding ascii
+                & docker cp $config "${proxy}:/etc/caddy/Caddyfile"
+                if ($LASTEXITCODE -ne 0) { throw 'Candidate failed; restoring old route failed. Old containers were not stopped.' }
+                & docker exec $proxy caddy reload --config /etc/caddy/Caddyfile
+                if ($LASTEXITCODE -ne 0) { throw 'Candidate failed; Caddy could not reload old route. Old containers were not stopped.' }
+                $switched = $false
+                throw 'Stable endpoint did not return candidate revision; prior backend route was restored.'
+              }
+              Write-Observation 'after-switch'
+              $candidateIsActive = $true
+            } else {
+              # First install listens only on 8081; the existing app at port 8000 is never touched.
+              $listeners = Get-NetTCPConnection -State Listen -LocalPort 8081 -ErrorAction SilentlyContinue
+              if ($listeners) { throw 'Port 8081 became occupied; refusing to take over the listener.' }
+              & docker run --detach --name $proxy --restart unless-stopped --network $network --publish '127.0.0.1:8081:80' $caddyImage
+              if ($LASTEXITCODE -ne 0) { throw 'Could not start new proxy on 127.0.0.1:8081.' }
+              $stableProxyStarted = $true
+              Set-Route $proxy $candidate
+              $switched = $true
+              if (-not (Test-Health 'http://127.0.0.1:8081/api/health' $env:DEPLOY_SHA)) {
+                & docker logs $proxy
+                throw 'New endpoint failed health verification. Existing port 8000 service was left untouched.'
+              }
+              Write-Observation 'first-deployment-after-switch'
+              $switched = $false
+              $stableProxyStarted = $false
+              $candidateIsActive = $true
+            }
+
+            # Caddy reload is graceful. Leave the old upstream available for 30 seconds,
+            # verify the new route again, then let Uvicorn drain requests before removing it.
+            if ($oldBackends.Count -gt 0) {
+              Write-Host "Traffic is on revision $($env:DEPLOY_SHA); draining prior upstream(s) for 30 seconds."
+              Start-Sleep -Seconds 30
+              if (-not (Test-Health 'http://127.0.0.1:8081/api/health' $env:DEPLOY_SHA)) { throw 'New stable route failed during drain; previous backend is still running.' }
+              foreach ($oldBackend in $oldBackends) {
+                if ($oldBackend -ne $candidate) {
+                  & docker stop --time 125 $oldBackend
+                  if ($LASTEXITCODE -ne 0) { throw "Could not gracefully stop old backend $oldBackend; new backend remains active." }
+                  $stoppedBackends += $oldBackend
+                }
+              }
+              if (-not (Test-Health 'http://127.0.0.1:8081/api/health' $env:DEPLOY_SHA)) { throw 'New route failed after old backend drain; restoring the prior service.' }
+              foreach ($oldBackend in $stoppedBackends) {
+                & docker rm $oldBackend
+                if ($LASTEXITCODE -ne 0) { throw "Could not remove drained old backend $oldBackend." }
+              }
+              $switched = $false
+            }
+            Write-Observation 'after-drain'
+            if (-not (Test-Health 'http://127.0.0.1:8081/api/health' $env:DEPLOY_SHA)) { throw 'Final stable endpoint check failed.' }
+            try {
+              $legacyAfter = Invoke-RestMethod -Uri 'http://127.0.0.1:8000/api/health' -TimeoutSec 4
+              Write-Host "Existing endpoint after deployment: http=200, status=$($legacyAfter.status), model_revision=$($legacyAfter.attribute_model_revision)."
+            } catch { Write-Host "Existing endpoint 127.0.0.1:8000 post-check: $($_.Exception.Message). It was not modified by this workflow." }
+            Write-Host "Deployment complete: http://127.0.0.1:8081/ -> $candidate (revision $($env:DEPLOY_SHA))."
+          } catch {
+            Write-Error $_
+            & docker logs $stageProxy 2>$null
+            if ($null -ne $oldConfig) { & docker logs $proxy 2>$null }
+            if ($switched -and $null -ne $oldConfig) {
+              foreach ($oldBackend in $stoppedBackends) {
+                & docker start $oldBackend
+                if ($LASTEXITCODE -ne 0) { $rollbackComplete = $false }
+              }
+              Set-Content -LiteralPath $config -Value $oldConfig -Encoding ascii
+              if ($rollbackComplete) { & docker cp $config "${proxy}:/etc/caddy/Caddyfile" }
+              if ($LASTEXITCODE -ne 0) { $rollbackComplete = $false }
+              if ($rollbackComplete) {
+                & docker exec $proxy caddy reload --config /etc/caddy/Caddyfile
+                if ($LASTEXITCODE -ne 0) { $rollbackComplete = $false }
+              }
+              if ($rollbackComplete) { $candidateIsActive = $false; Write-Host 'Rolled back to the previous route; previous container remains available.' }
+              else { Write-Error 'Rollback failed; keeping the candidate container running so the active route is not orphaned.' }
+            }
+            if ($stableProxyStarted) { & docker rm --force $proxy 2>$null }
+            if ($candidateStarted -and -not $candidateIsActive -and $rollbackComplete) { & docker logs $candidate 2>$null; & docker rm --force $candidate 2>$null }
+            throw
+          } finally {
+            & docker rm --force $stageProxy 2>$null
+            if ($monitor) {
+              New-Item -ItemType File -Path $stopFile -Force | Out-Null
+              Wait-Job $monitor -Timeout 10 | Out-Null
+              Stop-Job $monitor -ErrorAction SilentlyContinue
+              Remove-Job $monitor -Force -ErrorAction SilentlyContinue
+              Write-Host 'Timestamped deployment observations (before/during/after):'
+              if (Test-Path $monitorFile) { Get-Content $monitorFile }
+            }
+            Remove-Item $config -Force -ErrorAction SilentlyContinue
+            Remove-Item $stopFile -Force -ErrorAction SilentlyContinue
           }
-          if (-not $ready) {
-            & docker logs $container
-            throw 'Container started but the app/model health check did not pass.'
-          }
-          Write-Host 'Deployment succeeded; app and models are ready at http://localhost:8000.'
