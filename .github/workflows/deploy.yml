@@ -82,7 +82,7 @@ jobs:
           $image = "$($env:DOCKERHUB_USERNAME)/face-estimator:$($env:DEPLOY_SHA)"
           $candidate = "face-estimator-$($env:GITHUB_RUN_ID)"
           $stageProxy = "face-estimator-proxy-stage-$($env:GITHUB_RUN_ID)"
-          $stagePort = 58100 + ([int]$env:GITHUB_RUN_ID % 4000)
+          $stagePort = 58100 + [int]([long]$env:GITHUB_RUN_ID % 4000)
           $config = Join-Path $env:RUNNER_TEMP 'face-estimator.Caddyfile'
           $monitorFile = Join-Path $env:RUNNER_TEMP 'face-estimator-deploy-observations.jsonl'
           $stopFile = Join-Path $env:RUNNER_TEMP 'face-estimator-deploy-monitor.stop'
