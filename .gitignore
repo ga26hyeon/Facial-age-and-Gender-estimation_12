@@ -5,6 +5,7 @@ __pycache__/
 *.log
 *.tmp
 *.temp
+logs/redeployment-check.png
 test-face.jpg
 .pytest_cache/
 .venv/

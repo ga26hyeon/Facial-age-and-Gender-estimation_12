@@ -104,6 +104,7 @@ jobs:
               $row.models_ready = $health.models_ready
               $row.app_revision = $health.app_revision
               $row.model_revision = $health.attribute_model_revision
+              $row.face_crop_scale = $health.face_crop_scale
               $row.http = 200
             } catch { $row.http = 'unavailable'; $row.error = $_.Exception.Message }
             $line = $row | ConvertTo-Json -Compress
@@ -116,7 +117,7 @@ jobs:
             for ($i = 1; $i -le 60; $i++) {
               try {
                 $health = Invoke-RestMethod -Uri $uri -TimeoutSec 3
-                if ($health.status -eq 'ok' -and $health.models_ready -eq $true -and $health.attribute_model -eq 'snakajima/face-lens' -and $health.attribute_model_revision -eq 'd8e2c4cafb5e14a258202d8f5176973d25a244df' -and $health.app_revision -eq $expectedRevision) { return $true }
+                if ($health.status -eq 'ok' -and $health.models_ready -eq $true -and $health.attribute_model -eq 'snakajima/face-lens' -and $health.attribute_model_revision -eq 'd8e2c4cafb5e14a258202d8f5176973d25a244df' -and $health.face_crop_scale -eq 1.9 -and $health.app_revision -eq $expectedRevision) { return $true }
               } catch { }
               Start-Sleep -Seconds 2
             }

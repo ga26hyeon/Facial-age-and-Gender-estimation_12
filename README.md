@@ -43,7 +43,7 @@ Open `http://127.0.0.1:8000/`. Upload a photo or drag it onto the page, then cho
 Invoke-RestMethod http://127.0.0.1:8000/api/health
 ```
 
-`status` should be `ok` and `models_ready` should be `True`. In Docker deployments, the response also includes `app_revision` (the CI commit SHA) and `model_revision`, so an update can be identified at the running endpoint. The upload endpoint remains `POST /api/analyze` and returns face boxes, gender/age labels, and confidence values.
+`status` should be `ok` and `models_ready` should be `True`. In Docker deployments, the response also includes `app_revision` (the CI commit SHA), `model_revision`, and `face_crop_scale`, so an update can be identified at the running endpoint. The upload endpoint remains `POST /api/analyze` and returns face boxes, gender/age labels, and confidence values.
 
 ## 모델 평가
 

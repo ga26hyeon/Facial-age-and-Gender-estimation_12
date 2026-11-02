@@ -20,6 +20,9 @@ app = FastAPI(title="Face Estimate Lab", version="2.0.0")
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 FACE_LENS_REVISION = "d8e2c4cafb5e14a258202d8f5176973d25a244df"
+FACE_CROP_SCALE = float(os.getenv("FACE_CROP_SCALE", "1.9"))
+if FACE_CROP_SCALE <= 0:
+    raise ValueError("FACE_CROP_SCALE must be positive")
 MODEL_URLS = {
     "face.prototxt": "https://raw.githubusercontent.com/spmallick/learnopencv/master/AgeGender/opencv_face_detector.pbtxt",
     "face.pb": "https://raw.githubusercontent.com/spmallick/learnopencv/master/AgeGender/opencv_face_detector_uint8.pb",
@@ -81,7 +84,7 @@ def _attribute_input(image: np.ndarray, box: tuple[float, int, int, int, int]) -
     _, x1, y1, x2, y2 = box
     face_width, face_height = x2 - x1, y2 - y1
     crop_settings = attribute_metadata["crop"]
-    size = max(face_width, face_height) * float(crop_settings["scale"])
+    size = max(face_width, face_height) * FACE_CROP_SCALE
     center_x = (x1 + x2) / 2
     center_y = (y1 + y2) / 2 + face_height * float(crop_settings["shiftY"])
     left, top = center_x - size / 2, center_y - size / 2
@@ -182,6 +185,7 @@ def health():
         "models_ready": True,
         "attribute_model": "snakajima/face-lens",
         "attribute_model_revision": FACE_LENS_REVISION,
+        "face_crop_scale": FACE_CROP_SCALE,
         "app_revision": os.getenv("APP_REVISION", "local"),
     }
 
